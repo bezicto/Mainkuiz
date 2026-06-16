@@ -220,38 +220,46 @@
             gameAudio.toggleMute();
         }
 
-        // 1. Polling Backend
-        function pollState() {
-            fetch(`../api/game_state.php?session_id=${sessionId}&player_id=${playerId}`)
-            .then(res => res.json())
-            .then(data => {
+        // 1. SSE Connection for Game State
+        let eventSource = null;
+        let currentQuestionId = null;
+
+        function startStreaming() {
+            if (eventSource) {
+                eventSource.close();
+            }
+            eventSource = new EventSource(`../api/game_stream.php?session_id=${sessionId}&player_id=${playerId}`);
+            eventSource.onmessage = function(event) {
+                const data = JSON.parse(event.data);
                 if (data.status === 'success') {
                     handleStateTransition(data.session, data.player);
                 } else {
-                    // Session deleted or player kicked
-                    stopPolling();
+                    stopStreaming();
                     alert('Session has closed.');
                     window.location.href = '../index.php';
                 }
-            })
-            .catch(err => console.error('Poller error:', err));
+            };
+            eventSource.addEventListener('reconnect', function() {
+                startStreaming();
+            });
+            eventSource.onerror = function(err) {
+                console.error('SSE Stream error:', err);
+                eventSource.close();
+                setTimeout(startStreaming, 3000);
+            };
         }
 
-        function startPolling() {
-            pollState();
-            poller = setInterval(pollState, 1000);
-        }
-
-        function stopPolling() {
-            if (poller) {
-                clearInterval(poller);
-                poller = null;
+        function stopStreaming() {
+            if (eventSource) {
+                eventSource.close();
+                eventSource = null;
             }
         }
 
         // 2. Client Phase UI Controller
         function handleStateTransition(session, player) {
             const newStatus = session.status;
+            currentQuestionId = session.current_question_id;
             
             // Trigger audio on phase shifts
             if (newStatus !== lastPlayedState) {
@@ -343,41 +351,40 @@
             document.getElementById('ui-question').style.display = 'none';
             document.getElementById('ui-locked').style.display = 'flex';
 
-            const activeQuestionId = lastPlayedState === 'question' ? poller : null; // fetch active id
+            // Use the cached currentQuestionId from the stream transition instead of fetching again!
+            if (currentQuestionId) {
+                const formData = new FormData();
+                formData.append('action', 'submit_answer');
+                formData.append('player_id', playerId);
+                formData.append('question_id', currentQuestionId);
+                formData.append('answer_id', answerId);
 
-            // We need to fetch the session's active question ID
-            fetch(`../api/game_state.php?session_id=${sessionId}`)
-            .then(res => res.json())
-            .then(data => {
-                if (data.status === 'success' && data.session.current_question_id) {
-                    const qId = data.session.current_question_id;
-                    const formData = new FormData();
-                    formData.append('action', 'submit_answer');
-                    formData.append('player_id', playerId);
-                    formData.append('question_id', qId);
-                    formData.append('answer_id', answerId);
-
-                    fetch('../api/player_actions.php', {
-                        method: 'POST',
-                        body: formData
-                    })
-                    .then(res => res.json())
-                    .then(result => {
-                        if (result.status === 'success') {
-                            // Points will update in state polling
-                        } else {
-                            // Revert button pad on error
-                            hasSubmittedCurrent = false;
-                            document.getElementById('ui-locked').style.display = 'none';
-                            document.getElementById('ui-question').style.display = 'flex';
-                        }
-                    })
-                    .catch(err => {
-                        console.error('Answer submission fail:', err);
+                fetch('../api/player_actions.php', {
+                    method: 'POST',
+                    body: formData
+                })
+                .then(res => res.json())
+                .then(result => {
+                    if (result.status === 'success') {
+                        // Points will update in stream transition
+                    } else {
+                        // Revert button pad on error
                         hasSubmittedCurrent = false;
-                    });
-                }
-            });
+                        document.getElementById('ui-locked').style.display = 'none';
+                        document.getElementById('ui-question').style.display = 'flex';
+                    }
+                })
+                .catch(err => {
+                    console.error('Answer submission fail:', err);
+                    hasSubmittedCurrent = false;
+                    document.getElementById('ui-locked').style.display = 'none';
+                    document.getElementById('ui-question').style.display = 'flex';
+                });
+            } else {
+                hasSubmittedCurrent = false;
+                document.getElementById('ui-locked').style.display = 'none';
+                document.getElementById('ui-question').style.display = 'flex';
+            }
         }
 
         // Show Correct/Incorrect/Timeout Feedback
@@ -435,8 +442,8 @@
             gameAudio.init();
         }, { once: true });
 
-        // Start poller loop
-        startPolling();
+        // Start SSE stream
+        startStreaming();
     </script>
 </body>
 </html>

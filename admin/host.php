@@ -10,6 +10,7 @@ if (!isset($_SESSION['admin_logged_in'])) {
     header('Location: index.php');
     exit;
 }
+session_write_close(); // Release session file lock immediately!
 
 $sessionId = $_GET['session_id'] ?? null;
 if (!$sessionId) {
@@ -368,27 +369,34 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_leaders') {
             }
         }
 
-        // 1. Polling Game State
-        function pollGameState() {
-            fetch('../api/game_state.php?session_id=' + sessionId)
-            .then(res => res.json())
-            .then(data => {
+        // 1. SSE Connection for Game State
+        let eventSource = null;
+
+        function startStreaming() {
+            if (eventSource) {
+                eventSource.close();
+            }
+            eventSource = new EventSource('../api/game_stream.php?session_id=' + sessionId);
+            eventSource.onmessage = function(event) {
+                const data = JSON.parse(event.data);
                 if (data.status === 'success') {
                     handleStateTransition(data.session);
                 }
-            })
-            .catch(err => console.error('Polling error:', err));
+            };
+            eventSource.addEventListener('reconnect', function() {
+                startStreaming();
+            });
+            eventSource.onerror = function(err) {
+                console.error('SSE Stream error:', err);
+                eventSource.close();
+                setTimeout(startStreaming, 3000);
+            };
         }
 
-        function startPolling() {
-            pollGameState();
-            poller = setInterval(pollGameState, 1000);
-        }
-
-        function stopPolling() {
-            if (poller) {
-                clearInterval(poller);
-                poller = null;
+        function stopStreaming() {
+            if (eventSource) {
+                eventSource.close();
+                eventSource = null;
             }
         }
 
@@ -477,7 +485,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_leaders') {
 
         // Phase: 3s Countdown Animation
         function runLobbyCountdown(session) {
-            stopPolling(); // Pause state poller while hosting local countdown
+            stopStreaming(); // Pause state stream while hosting local countdown
             let val = 3;
             const timerBox = document.getElementById('countdown-timer-box');
             timerBox.innerText = val;
@@ -585,14 +593,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_leaders') {
 
         // Phase: Leaderboard Rank display
         function updateLeaderboardUI() {
-            fetch('../api/game_state.php?session_id=' + sessionId)
-            .then(res => res.json())
-            .then(data => {
-                if (data.status === 'success') {
-                    // Fetch top 5 players for this session directly from DB
-                    fetchLeaderboardData();
-                }
-            });
+            fetchLeaderboardData();
         }
 
         function fetchLeaderboardData() {
@@ -700,11 +701,8 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_leaders') {
             .then(res => res.json())
             .then(data => {
                 if (data.status === 'success') {
-                    // Resume polling to fetch new transitions instantly
-                    if (!poller) {
-                        startPolling();
-                    } else {
-                        pollGameState();
+                    if (!eventSource) {
+                        startStreaming();
                     }
                 } else {
                     console.error('Action failed:', data.message);
@@ -718,8 +716,8 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_leaders') {
             gameAudio.init();
         }, { once: true });
 
-        // Start polling loop
-        startPolling();
+        // Start SSE stream
+        startStreaming();
     </script>
 </body>
 </html>
