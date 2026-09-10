@@ -53,6 +53,32 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_leaders') {
     echo json_encode($leaders);
     exit;
 }
+
+// Calculate base URL path for the application root (e.g., /kashoot or empty)
+$scriptPath = $_SERVER['SCRIPT_NAME'] ?? '';
+$adminDir = str_replace('\\', '/', dirname($scriptPath));
+$appDir = str_replace('\\', '/', dirname($adminDir));
+$appBasePath = ($appDir === '/' || $appDir === '.' || $appDir === '\\') ? '' : $appDir;
+
+// Detect server LAN IPv4 address (e.g., 192.168.x.x) for seamless smartphone connectivity
+$detectedLanIp = null;
+$sock = @socket_create(AF_INET, SOCK_DGRAM, SOL_UDP);
+if ($sock) {
+    if (@socket_connect($sock, '8.8.8.8', 53)) {
+        @socket_getsockname($sock, $detectedLanIp);
+    }
+    @socket_close($sock);
+}
+if (!$detectedLanIp || $detectedLanIp === '127.0.0.1') {
+    $detectedLanIp = !empty($_SERVER['SERVER_ADDR']) && $_SERVER['SERVER_ADDR'] !== '127.0.0.1' && $_SERVER['SERVER_ADDR'] !== '::1' 
+        ? $_SERVER['SERVER_ADDR'] 
+        : null;
+}
+
+$httpHost = $_SERVER['HTTP_HOST'] ?? 'localhost';
+$hostParts = explode(':', $httpHost);
+$portSuffix = (isset($hostParts[1]) && $hostParts[1]) ? (':' . $hostParts[1]) : '';
+$lanHost = $detectedLanIp ? ($detectedLanIp . $portSuffix) : null;
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -61,6 +87,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_leaders') {
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Hosting: <?= htmlspecialchars($session['quiz_title']) ?></title>
     <link rel="stylesheet" href="../assets/css/style.css">
+    <script src="../assets/js/qrcode.min.js"></script>
     <style>
         /* Host Specific Styles */
         .host-header {
@@ -230,12 +257,39 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_leaders') {
         </div>
         
         <div class="container host-lobby" style="padding-top: 1rem;">
-            <!-- Giant Centered Join Instructions & PIN -->
-            <div style="background: var(--card-bg); border: 1px solid var(--card-border); padding: 2.5rem; border-radius: 24px; max-width: 650px; margin: 0 auto 2.5rem auto; box-shadow: var(--shadow-lg); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);">
-                <p style="font-size: 1.6rem; font-weight: 600; color: var(--text-muted); margin-bottom: 1rem;">Join at <span style="color: #fff; font-weight: 800; border-bottom: 2px solid var(--primary-glow); padding-bottom: 2px;"><?= htmlspecialchars($_SERVER['HTTP_HOST'] ?? 'mainkuiz') ?></span></p>
-                <p style="font-size: 1.3rem; font-weight: 600; color: var(--text-muted); margin-bottom: 1.5rem;">with Game PIN:</p>
-                <div style="font-size: 5.5rem; font-weight: 800; color: var(--primary-glow); letter-spacing: 4px; background: rgba(0, 0, 0, 0.4); border: 3px dashed var(--primary-glow); padding: 0.75rem 3rem; border-radius: 20px; display: inline-block; box-shadow: 0 0 45px rgba(138, 43, 226, 0.35); text-shadow: 0 0 10px rgba(138, 43, 226, 0.5);">
-                    <?= htmlspecialchars($session['pin']) ?>
+            <!-- Giant Join Instructions & QR Code Card -->
+            <div class="host-lobby-card">
+                <div class="host-lobby-split">
+                    <!-- Left: URL, Host switcher & PIN -->
+                    <div class="host-join-info">
+                        <div class="host-join-title">
+                            <span>Join at</span>
+                            <span id="join-url-text" class="host-join-url"><?= htmlspecialchars(($lanHost ?: $httpHost) . $appBasePath) ?></span>
+                            <button type="button" onclick="copyJoinLink()" class="host-copy-btn" id="copy-btn">📋 Copy</button>
+                        </div>
+                        
+                        <?php if ($lanHost && (str_starts_with($httpHost, 'localhost') || str_starts_with($httpHost, '127.0.0.1'))): ?>
+                        <div class="host-ip-selector" id="host-ip-selector">
+                            <span style="font-size: 0.75rem; color: var(--text-muted); font-weight: 600;">Display:</span>
+                            <button type="button" class="host-ip-chip active" id="chip-lan" onclick="switchHostMode('lan')">📶 Wi-Fi IP (<?= htmlspecialchars($lanHost) ?>)</button>
+                            <button type="button" class="host-ip-chip" id="chip-local" onclick="switchHostMode('local')">💻 Localhost</button>
+                        </div>
+                        <?php endif; ?>
+
+                        <div class="host-pin-label">with Game PIN:</div>
+                        <div class="host-pin-box">
+                            <?= htmlspecialchars($session['pin']) ?>
+                        </div>
+                    </div>
+
+                    <!-- Right: QR Code for instant phone entry -->
+                    <div class="host-qr-section">
+                        <div class="host-qr-card" onclick="openQrModal()" title="Click to enlarge QR code">
+                            <div id="lobby-qrcode" class="qr-canvas-holder"></div>
+                        </div>
+                        <div class="host-qr-subtext">📱 Scan to join directly</div>
+                        <div class="host-qr-enlarge-hint" onclick="openQrModal()">🔍 Click to enlarge</div>
+                    </div>
                 </div>
             </div>
 
@@ -267,7 +321,8 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_leaders') {
         <header>
             <div class="logo">MAINKUIZ!</div>
             <div style="font-weight: 600; font-size: 1.1rem;" id="q-counter-display">Question 1 of 5</div>
-            <div>
+            <div style="display: flex; align-items: center; gap: 0.75rem;">
+                <button type="button" onclick="openQrModal()" class="host-copy-btn" style="padding: 0.45rem 0.8rem; font-size: 0.85rem;" title="Show QR Code">📱 PIN: <?= htmlspecialchars($session['pin']) ?></button>
                 <button onclick="skipQuestion()" class="btn-primary" style="padding: 0.5rem 1.2rem; font-size: 0.9rem; width: auto;">Skip Timer</button>
             </div>
         </header>
@@ -292,7 +347,10 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_leaders') {
     <div id="phase-answers" class="phase-section" style="display: none;">
         <header>
             <div class="logo">MAINKUIZ!</div>
-            <h3 style="font-weight: 600; font-size: 1.1rem;">Answer Breakdown</h3>
+            <div style="display: flex; align-items: center; gap: 0.75rem;">
+                <h3 style="font-weight: 600; font-size: 1.1rem; margin: 0;">Answer Breakdown</h3>
+                <button type="button" onclick="openQrModal()" class="host-copy-btn" style="padding: 0.35rem 0.75rem; font-size: 0.85rem;" title="Show QR Code">📱 PIN: <?= htmlspecialchars($session['pin']) ?></button>
+            </div>
             <div>
                 <button onclick="showLeaderboard()" class="btn-primary" style="padding: 0.5rem 1.2rem; font-size: 0.9rem; width: auto; background: linear-gradient(135deg, #0088ff 0%, #0055bb 100%);">Next &rarr;</button>
             </div>
@@ -316,7 +374,10 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_leaders') {
     <div id="phase-leaderboard" class="phase-section" style="display: none;">
         <header>
             <div class="logo">MAINKUIZ!</div>
-            <h3 style="font-weight: 600; font-size: 1.1rem;">Leaderboard</h3>
+            <div style="display: flex; align-items: center; gap: 0.75rem;">
+                <h3 style="font-weight: 600; font-size: 1.1rem; margin: 0;">Leaderboard</h3>
+                <button type="button" onclick="openQrModal()" class="host-copy-btn" style="padding: 0.35rem 0.75rem; font-size: 0.85rem;" title="Show QR Code">📱 PIN: <?= htmlspecialchars($session['pin']) ?></button>
+            </div>
             <div>
                 <button onclick="nextQuestion()" class="btn-primary" style="padding: 0.5rem 1.2rem; font-size: 0.9rem; width: auto;">Next Question &rarr;</button>
             </div>
@@ -358,9 +419,161 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_leaders') {
         </div>
     </div>
 
+    <!-- Fullscreen Enlarged QR Modal -->
+    <div id="qr-enlarge-modal" class="qr-modal-overlay" style="display: none;" onclick="closeQrModal(event)">
+        <div class="qr-modal-card" onclick="event.stopPropagation()">
+            <button type="button" class="qr-modal-close" onclick="closeQrModal()" title="Close">&times;</button>
+            <h2 style="font-size: 1.8rem; font-weight: 800; margin-bottom: 0.3rem; letter-spacing: 0.5px;">Scan to Join</h2>
+            <p style="color: var(--text-muted); font-size: 1.05rem;" id="modal-join-url-text">Join at ...</p>
+            <div class="qr-modal-code-wrapper" id="modal-qrcode"></div>
+            <div style="font-size: 1.1rem; font-weight: 600; color: var(--text-muted); margin-bottom: 0.4rem;">Game PIN:</div>
+            <div class="host-pin-box" style="font-size: 3.5rem; padding: 0.4rem 2rem;"><?= htmlspecialchars($session['pin']) ?></div>
+            <div style="margin-top: 1.2rem;">
+                <button type="button" onclick="copyJoinLink()" class="btn-primary" style="padding: 0.6rem 1.5rem; font-size: 0.95rem; width: auto; text-transform: none; display: inline-flex; align-items: center; gap: 0.5rem; margin: 0 auto;">
+                    📋 Copy Direct Join Link
+                </button>
+            </div>
+        </div>
+    </div>
+
     <script src="../assets/js/audio.js"></script>
     <script>
         const sessionId = <?= $sessionId ?>;
+        const gamePin = '<?= addslashes($session['pin']) ?>';
+        const detectedLanHost = <?= json_encode($lanHost) ?>;
+        const appBasePath = <?= json_encode($appBasePath) ?>;
+
+        // Auto-select LAN IP when host accessed via localhost so players can join
+        const browserHost = window.location.host;
+        let activeHost = (browserHost.startsWith('localhost') || browserHost.startsWith('127.0.0.1')) && detectedLanHost
+            ? detectedLanHost
+            : browserHost;
+
+        function getDisplayUrl() {
+            return activeHost + appBasePath;
+        }
+
+        function getFullJoinUrl(withPin = true) {
+            const protocol = window.location.protocol;
+            const base = `${protocol}//${activeHost}${appBasePath}/`;
+            return withPin ? `${base}?pin=${encodeURIComponent(gamePin)}` : base;
+        }
+
+        let lobbyQrInstance = null;
+        let modalQrInstance = null;
+
+        function renderQrCodes() {
+            const qrUrl = getFullJoinUrl(true);
+            const displayUrl = getDisplayUrl();
+
+            const urlTextEl = document.getElementById('join-url-text');
+            if (urlTextEl) urlTextEl.innerText = displayUrl;
+
+            const modalUrlEl = document.getElementById('modal-join-url-text');
+            if (modalUrlEl) modalUrlEl.innerText = 'Join at ' + displayUrl;
+
+            // Render Lobby QR code
+            const lobbyBox = document.getElementById('lobby-qrcode');
+            if (lobbyBox && typeof QRCode !== 'undefined') {
+                lobbyBox.innerHTML = '';
+                try {
+                    lobbyQrInstance = new QRCode(lobbyBox, {
+                        text: qrUrl,
+                        width: 170,
+                        height: 170,
+                        colorDark: "#0a041a",
+                        colorLight: "#ffffff",
+                        correctLevel: QRCode.CorrectLevel.M
+                    });
+                } catch (e) {
+                    console.error('Error rendering lobby QR:', e);
+                }
+            }
+
+            // Render Modal QR code
+            const modalBox = document.getElementById('modal-qrcode');
+            if (modalBox && typeof QRCode !== 'undefined') {
+                modalBox.innerHTML = '';
+                try {
+                    modalQrInstance = new QRCode(modalBox, {
+                        text: qrUrl,
+                        width: 280,
+                        height: 280,
+                        colorDark: "#0a041a",
+                        colorLight: "#ffffff",
+                        correctLevel: QRCode.CorrectLevel.M
+                    });
+                } catch (e) {
+                    console.error('Error rendering modal QR:', e);
+                }
+            }
+        }
+
+        function switchHostMode(mode) {
+            if (mode === 'lan' && detectedLanHost) {
+                activeHost = detectedLanHost;
+                document.getElementById('chip-lan')?.classList.add('active');
+                document.getElementById('chip-local')?.classList.remove('active');
+            } else {
+                activeHost = browserHost;
+                document.getElementById('chip-local')?.classList.add('active');
+                document.getElementById('chip-lan')?.classList.remove('active');
+            }
+            renderQrCodes();
+        }
+
+        function openQrModal() {
+            const modal = document.getElementById('qr-enlarge-modal');
+            if (modal) {
+                modal.style.display = 'flex';
+                renderQrCodes();
+            }
+        }
+
+        function closeQrModal(e) {
+            if (!e || e.target.id === 'qr-enlarge-modal' || e.target.classList.contains('qr-modal-close')) {
+                const modal = document.getElementById('qr-enlarge-modal');
+                if (modal) modal.style.display = 'none';
+            }
+        }
+
+        // Close modal on Escape key
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape') {
+                const modal = document.getElementById('qr-enlarge-modal');
+                if (modal && modal.style.display !== 'none') modal.style.display = 'none';
+            }
+        });
+
+        function copyJoinLink() {
+            const link = getFullJoinUrl(true);
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(link).then(() => {
+                    showToast('Copied direct join link with PIN!');
+                }).catch(() => {
+                    prompt('Copy this join link:', link);
+                });
+            } else {
+                prompt('Copy this join link:', link);
+            }
+        }
+
+        function showToast(msg) {
+            const oldToast = document.querySelector('.toast-msg');
+            if (oldToast) oldToast.remove();
+
+            const toast = document.createElement('div');
+            toast.className = 'toast-msg';
+            toast.innerText = '✓ ' + msg;
+            document.body.appendChild(toast);
+
+            setTimeout(() => {
+                toast.style.opacity = '0';
+                toast.style.transition = 'opacity 0.4s ease';
+                setTimeout(() => toast.remove(), 400);
+            }, 2500);
+        }
+
         let currentStatus = '';
         let poller = null;
         let countdownTimer = null;
@@ -773,6 +986,9 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_leaders') {
         document.body.addEventListener('click', function() {
             gameAudio.init();
         }, { once: true });
+
+        // Initial render of QR codes and URL display
+        renderQrCodes();
 
         // Immediate direct state fetch (guarantees fast UI sync)
         fetchStateDirect();
