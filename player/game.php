@@ -220,40 +220,87 @@
             gameAudio.toggleMute();
         }
 
-        // 1. SSE Connection for Game State
+        // 1. SSE Connection & Polling Fallback for Game State
         let eventSource = null;
         let currentQuestionId = null;
+        let fallbackPollTimer = null;
+        let sseHealthy = false;
+        let sseWatchdog = null;
+
+        function fetchStateDirect() {
+            fetch(`../api/game_state.php?session_id=${sessionId}&player_id=${playerId}`)
+                .then(res => res.json())
+                .then(data => {
+                    if (data && data.status === 'success' && data.session && data.player) {
+                        handleStateTransition(data.session, data.player);
+                    }
+                })
+                .catch(err => console.warn('Direct fetch state notice:', err));
+        }
+
+        function startFallbackPolling() {
+            if (fallbackPollTimer) return;
+            console.warn('Activating fallback polling mechanism for player state.');
+            fetchStateDirect();
+            fallbackPollTimer = setInterval(fetchStateDirect, 1500);
+        }
+
+        function stopFallbackPolling() {
+            if (fallbackPollTimer) {
+                clearInterval(fallbackPollTimer);
+                fallbackPollTimer = null;
+            }
+        }
 
         function startStreaming() {
             if (eventSource) {
                 eventSource.close();
             }
+            sseHealthy = false;
+
+            // Watchdog: If SSE does not receive an event within 3 seconds, start fallback polling
+            clearTimeout(sseWatchdog);
+            sseWatchdog = setTimeout(() => {
+                if (!sseHealthy) {
+                    startFallbackPolling();
+                }
+            }, 3000);
+
             eventSource = new EventSource(`../api/game_stream.php?session_id=${sessionId}&player_id=${playerId}`);
             eventSource.onmessage = function(event) {
-                const data = JSON.parse(event.data);
-                if (data.status === 'success') {
-                    handleStateTransition(data.session, data.player);
-                } else {
-                    stopStreaming();
-                    alert('Session has closed.');
-                    window.location.href = '../index.php';
+                try {
+                    const data = JSON.parse(event.data);
+                    if (data.status === 'success') {
+                        sseHealthy = true;
+                        stopFallbackPolling();
+                        handleStateTransition(data.session, data.player);
+                    } else {
+                        stopStreaming();
+                        alert('Session has closed.');
+                        window.location.href = '../index.php';
+                    }
+                } catch (e) {
+                    console.error('Failed to parse SSE payload:', e);
                 }
             };
             eventSource.addEventListener('reconnect', function() {
                 startStreaming();
             });
             eventSource.onerror = function(err) {
-                console.error('SSE Stream error:', err);
+                console.warn('SSE Stream error, falling back to polling:', err);
                 eventSource.close();
-                setTimeout(startStreaming, 3000);
+                startFallbackPolling();
+                setTimeout(startStreaming, 5000);
             };
         }
 
         function stopStreaming() {
+            clearTimeout(sseWatchdog);
             if (eventSource) {
                 eventSource.close();
                 eventSource = null;
             }
+            stopFallbackPolling();
         }
 
         // 2. Client Phase UI Controller
@@ -442,7 +489,10 @@
             gameAudio.init();
         }, { once: true });
 
-        // Start SSE stream
+        // Immediate direct state fetch for instant UI sync
+        fetchStateDirect();
+
+        // Start SSE stream with automatic fallback polling
         startStreaming();
     </script>
 </body>

@@ -33,6 +33,15 @@ if (!$session) {
     exit;
 }
 
+// Pre-fetch participants if game is in waiting phase for instant render
+$initialPlayers = [];
+if ($session['status'] === 'waiting') {
+    $stmt = $pdo->prepare("SELECT id, nickname FROM players WHERE session_id = ? ORDER BY id ASC");
+    $stmt->execute([$sessionId]);
+    $initialPlayers = $stmt->fetchAll();
+}
+$initialPlayerCount = count($initialPlayers);
+
 // Handle local leaderboard fetch requests (before any HTML output!)
 if (isset($_GET['action']) && $_GET['action'] === 'get_leaders') {
     $limit = (int)($_GET['limit'] ?? 5);
@@ -214,8 +223,8 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_leaders') {
         </button>
     </div>
 
-    <!-- 1. Lobby Phase -->
-    <div id="phase-waiting" class="phase-section" style="display: none;">
+    <!-- 1. Lobby Phase (Rendered visible if status is waiting) -->
+    <div id="phase-waiting" class="phase-section" style="<?= $session['status'] === 'waiting' ? 'display: block;' : 'display: none;' ?>">
         <div class="host-header" style="justify-content: center; border-bottom: none; background: transparent; padding-top: 2rem;">
             <div class="logo" style="font-size: 3rem; text-align: center;">MAINKUIZ!</div>
         </div>
@@ -223,7 +232,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_leaders') {
         <div class="container host-lobby" style="padding-top: 1rem;">
             <!-- Giant Centered Join Instructions & PIN -->
             <div style="background: var(--card-bg); border: 1px solid var(--card-border); padding: 2.5rem; border-radius: 24px; max-width: 650px; margin: 0 auto 2.5rem auto; box-shadow: var(--shadow-lg); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);">
-                <p style="font-size: 1.6rem; font-weight: 600; color: var(--text-muted); margin-bottom: 1rem;">Join at <span style="color: #fff; font-weight: 800; border-bottom: 2px solid var(--primary-glow); padding-bottom: 2px;">mainkuiz.test</span></p>
+                <p style="font-size: 1.6rem; font-weight: 600; color: var(--text-muted); margin-bottom: 1rem;">Join at <span style="color: #fff; font-weight: 800; border-bottom: 2px solid var(--primary-glow); padding-bottom: 2px;"><?= htmlspecialchars($_SERVER['HTTP_HOST'] ?? 'mainkuiz') ?></span></p>
                 <p style="font-size: 1.3rem; font-weight: 600; color: var(--text-muted); margin-bottom: 1.5rem;">with Game PIN:</p>
                 <div style="font-size: 5.5rem; font-weight: 800; color: var(--primary-glow); letter-spacing: 4px; background: rgba(0, 0, 0, 0.4); border: 3px dashed var(--primary-glow); padding: 0.75rem 3rem; border-radius: 20px; display: inline-block; box-shadow: 0 0 45px rgba(138, 43, 226, 0.35); text-shadow: 0 0 10px rgba(138, 43, 226, 0.5);">
                     <?= htmlspecialchars($session['pin']) ?>
@@ -233,7 +242,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_leaders') {
             <h1 class="heading-lg" style="font-size: 1.8rem; color: var(--text-muted); margin-bottom: 1rem;">Waiting for players to join...</h1>
             <div class="lobby-stats">
                 <div>
-                    <div id="lobby-player-count" class="lobby-stat-val">0</div>
+                    <div id="lobby-player-count" class="lobby-stat-val"><?= $initialPlayerCount ?></div>
                     <div>Participants</div>
                 </div>
             </div>
@@ -241,7 +250,9 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_leaders') {
             <button onclick="startGame()" class="btn-primary" style="max-width: 300px; margin-top: 1rem;">Start Quiz</button>
             
             <div class="nickname-list" id="lobby-nicknames">
-                <!-- Connected players will inject here dynamically -->
+                <?php foreach ($initialPlayers as $idx => $p): ?>
+                    <div class="nickname-badge" style="--delay: <?= ($idx % 5) * 0.5 ?>s;"><?= htmlspecialchars($p['nickname']) ?></div>
+                <?php endforeach; ?>
             </div>
         </div>
     </div>
@@ -369,35 +380,82 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_leaders') {
             }
         }
 
-        // 1. SSE Connection for Game State
+        // 1. SSE Connection & Polling Fallback for Game State
         let eventSource = null;
+        let fallbackPollTimer = null;
+        let sseHealthy = false;
+        let sseWatchdog = null;
+
+        function fetchStateDirect() {
+            fetch('../api/game_state.php?session_id=' + sessionId)
+                .then(res => res.json())
+                .then(data => {
+                    if (data && data.status === 'success' && data.session) {
+                        handleStateTransition(data.session);
+                    }
+                })
+                .catch(err => console.warn('Direct fetch state notice:', err));
+        }
+
+        function startFallbackPolling() {
+            if (fallbackPollTimer) return;
+            console.warn('Activating fallback polling mechanism for game state.');
+            fetchStateDirect();
+            fallbackPollTimer = setInterval(fetchStateDirect, 1500);
+        }
+
+        function stopFallbackPolling() {
+            if (fallbackPollTimer) {
+                clearInterval(fallbackPollTimer);
+                fallbackPollTimer = null;
+            }
+        }
 
         function startStreaming() {
             if (eventSource) {
                 eventSource.close();
             }
+            sseHealthy = false;
+
+            // Watchdog: If SSE does not receive an event within 3 seconds, start fallback polling
+            clearTimeout(sseWatchdog);
+            sseWatchdog = setTimeout(() => {
+                if (!sseHealthy) {
+                    startFallbackPolling();
+                }
+            }, 3000);
+
             eventSource = new EventSource('../api/game_stream.php?session_id=' + sessionId);
             eventSource.onmessage = function(event) {
-                const data = JSON.parse(event.data);
-                if (data.status === 'success') {
-                    handleStateTransition(data.session);
+                try {
+                    const data = JSON.parse(event.data);
+                    if (data.status === 'success') {
+                        sseHealthy = true;
+                        stopFallbackPolling();
+                        handleStateTransition(data.session);
+                    }
+                } catch (e) {
+                    console.error('Failed to parse SSE payload:', e);
                 }
             };
             eventSource.addEventListener('reconnect', function() {
                 startStreaming();
             });
             eventSource.onerror = function(err) {
-                console.error('SSE Stream error:', err);
+                console.warn('SSE stream error, using fallback polling:', err);
                 eventSource.close();
-                setTimeout(startStreaming, 3000);
+                startFallbackPolling();
+                setTimeout(startStreaming, 5000);
             };
         }
 
         function stopStreaming() {
+            clearTimeout(sseWatchdog);
             if (eventSource) {
                 eventSource.close();
                 eventSource = null;
             }
+            stopFallbackPolling();
         }
 
         // 2. State Controller Transitions
@@ -716,7 +774,10 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_leaders') {
             gameAudio.init();
         }, { once: true });
 
-        // Start SSE stream
+        // Immediate direct state fetch (guarantees fast UI sync)
+        fetchStateDirect();
+
+        // Start SSE stream with automatic fallback polling
         startStreaming();
     </script>
 </body>

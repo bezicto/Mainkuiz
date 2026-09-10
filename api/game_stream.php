@@ -5,16 +5,25 @@
 // Disable time limit
 set_time_limit(0);
 
-// Prevent buffering
-header('Content-Type: text/event-stream');
-header('Cache-Control: no-cache');
-header('Connection: keep-alive');
-header('X-Accel-Buffering: no'); // Disable buffering for Nginx/Apache proxy layers
+// Disable compression and output buffering to prevent proxy/server buffering
+@ini_set('zlib.output_compression', 'Off');
+@ini_set('output_buffering', 'Off');
+@ini_set('implicit_flush', '1');
+ob_implicit_flush(true);
 
-// Disable output buffering
+// Headers to prevent caching and buffering in Nginx, Apache, LiteSpeed, Cloudflare
+header('Content-Type: text/event-stream');
+header('Cache-Control: no-cache, no-transform');
+header('Connection: keep-alive');
+header('X-Accel-Buffering: no');
+
+// Clear existing output buffers
 while (ob_get_level() > 0) {
     ob_end_flush();
 }
+
+// Send 2KB initial padding to force-flush proxy buffers (Nginx, Cloudflare, cPanel)
+echo ":" . str_repeat(" ", 2048) . "\n\n";
 flush();
 
 require_once '../db.php';
