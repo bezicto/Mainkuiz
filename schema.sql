@@ -62,7 +62,7 @@ CREATE TABLE players (
     last_question_correct TINYINT(1) DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE KEY unique_nick_session (session_id, nickname),
-    INDEX idx_session_score (session_id, score DESC),
+    INDEX idx_session_score (session_id, score),
     FOREIGN KEY (session_id) REFERENCES game_sessions(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
