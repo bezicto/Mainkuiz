@@ -43,13 +43,15 @@ In `/etc/apache2/mods-available/mpm_event.conf` (Ubuntu/Debian) or `httpd-mpm.co
 
 ```apache
 <IfModule mpm_event_module>
-    StartServers             3
-    MinSpareThreads         50
-    MaxSpareThreads        150
-    ThreadLimit             64
-    ThreadsPerChild         32
-    MaxRequestWorkers      400
+    StartServers               4
+    ServerLimit               32
+    ThreadLimit               64
+    ThreadsPerChild           32
+    MinSpareThreads           64
+    MaxSpareThreads          256
+    MaxRequestWorkers        800
     MaxConnectionsPerChild 10000
+    AsyncRequestWorkerFactor   3
 </IfModule>
 ```
 
@@ -174,3 +176,8 @@ In Apache VirtualHost:
    - When players submit answers, only their own row in `players` is locked. The shared `game_sessions` row is NOT locked, allowing hundreds of players to submit answers in parallel within fractions of a second.
 4. **Set-Based Batch Resolution**:
    - When a question times out, all timed-out players are recorded and streaks reset via a single SQL set-operation rather than thousands of individual queries.
+5. **Decoupled Lightning Answer Submissions**:
+   - `submit_answer` writes only the player's answer and updates their score, eliminating completion count queries from the transaction. The host projector screen tracks room completion independently.
+6. **Single-Statement Window Function Ranking**:
+   - Player ranks are computed atomically in MariaDB via `DENSE_RANK() OVER (ORDER BY score DESC, id ASC)` in a single statement upon question completion, completely eliminating per-player `COUNT(*)` range scans during result reveals.
+

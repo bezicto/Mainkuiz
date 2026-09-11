@@ -60,10 +60,12 @@ CREATE TABLE players (
     nickname VARCHAR(50) NOT NULL,
     score INT NOT NULL DEFAULT 0,
     streak INT NOT NULL DEFAULT 0,
+    rank INT NOT NULL DEFAULT 1,
     last_question_correct TINYINT(1) DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE KEY unique_nick_session (session_id, nickname),
     INDEX idx_session_score (session_id, score),
+    INDEX idx_session_rank (session_id, rank),
     INDEX idx_session_player (session_id, id),
     CONSTRAINT fk_players_session FOREIGN KEY (session_id) REFERENCES game_sessions(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci ROW_FORMAT=DYNAMIC;

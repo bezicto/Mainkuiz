@@ -27,6 +27,19 @@ $options = [
 
 try {
     $pdo = new PDO($dsn, $user, $pass, $options);
+
+    // Auto-migrate schema: ensure 'rank' column exists in 'players' table
+    try {
+        $driver = $pdo->getAttribute(PDO::ATTR_DRIVER_NAME);
+        if ($driver === 'mysql') {
+            $hasRank = $pdo->query("SHOW COLUMNS FROM players LIKE 'rank'")->fetch();
+            if (!$hasRank) {
+                $pdo->exec("ALTER TABLE players ADD COLUMN rank INT NOT NULL DEFAULT 1 AFTER streak, ADD INDEX idx_session_rank (session_id, rank)");
+            }
+        }
+    } catch (\Throwable $migErr) {
+        // Ignore if already present or permission denied
+    }
 } catch (\PDOException $e) {
     error_log("Database connection error: " . $e->getMessage());
     header('Content-Type: application/json', true, 500);

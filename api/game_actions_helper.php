@@ -11,8 +11,10 @@ function end_question_and_show_results($pdo, $sessionId) {
             $pdo->beginTransaction();
         }
 
-        // Lock session for update
-        $stmt = $pdo->prepare("SELECT * FROM game_sessions WHERE id = ? FOR UPDATE");
+        // Lock session for update (FOR UPDATE on MySQL/MariaDB; omitted on SQLite)
+        $driver = $pdo->getAttribute(PDO::ATTR_DRIVER_NAME);
+        $lockClause = ($driver === 'sqlite') ? '' : ' FOR UPDATE';
+        $stmt = $pdo->prepare("SELECT * FROM game_sessions WHERE id = ?" . $lockClause);
         $stmt->execute([$sessionId]);
         $session = $stmt->fetch();
 
@@ -40,9 +42,10 @@ function end_question_and_show_results($pdo, $sessionId) {
 
         // 2. High-performance set-based timeout handling (Single SQL statement instead of PHP array loops)
         if ($questionId) {
+            $insertIgnore = ($driver === 'sqlite') ? 'INSERT OR IGNORE INTO' : 'INSERT IGNORE INTO';
             // Insert timeout records (answer_id = NULL, points = 0) for all participants with no submitted answer
             $stmt = $pdo->prepare("
-                INSERT IGNORE INTO player_answers (player_id, question_id, answer_id, points_earned, response_time_ms)
+                $insertIgnore player_answers (player_id, question_id, answer_id, points_earned, response_time_ms)
                 SELECT p.id, ?, NULL, 0, 0
                 FROM players p
                 LEFT JOIN player_answers pa ON pa.player_id = p.id AND pa.question_id = ?
@@ -51,13 +54,56 @@ function end_question_and_show_results($pdo, $sessionId) {
             $stmt->execute([$questionId, $questionId, $sessionId]);
 
             // Reset streaks and last_question_correct for players who timed out
-            $stmt = $pdo->prepare("
-                UPDATE players p
-                JOIN player_answers pa ON pa.player_id = p.id
-                SET p.streak = 0, p.last_question_correct = 0
-                WHERE p.session_id = ? AND pa.question_id = ? AND pa.answer_id IS NULL
-            ");
-            $stmt->execute([$sessionId, $questionId]);
+            if ($driver === 'sqlite') {
+                $stmt = $pdo->prepare("
+                    UPDATE players
+                    SET streak = 0, last_question_correct = 0
+                    WHERE id IN (
+                        SELECT player_id FROM player_answers WHERE question_id = ? AND answer_id IS NULL
+                    ) AND session_id = ?
+                ");
+                $stmt->execute([$questionId, $sessionId]);
+            } else {
+                $stmt = $pdo->prepare("
+                    UPDATE players p
+                    JOIN player_answers pa ON pa.player_id = p.id
+                    SET p.streak = 0, p.last_question_correct = 0
+                    WHERE p.session_id = ? AND pa.question_id = ? AND pa.answer_id IS NULL
+                ");
+                $stmt->execute([$sessionId, $questionId]);
+            }
+        }
+
+        // 3. Batch-calculate and persist player ranks in a single SQL statement
+        try {
+            $driver = $pdo->getAttribute(PDO::ATTR_DRIVER_NAME);
+            if ($driver === 'sqlite') {
+                $stmt = $pdo->prepare("
+                    UPDATE players 
+                    SET rank = r.calculated_rank
+                    FROM (
+                        SELECT id, DENSE_RANK() OVER (ORDER BY score DESC, id ASC) as calculated_rank 
+                        FROM players 
+                        WHERE session_id = ?
+                    ) r
+                    WHERE players.id = r.id AND players.session_id = ?
+                ");
+                $stmt->execute([$sessionId, $sessionId]);
+            } else {
+                $stmt = $pdo->prepare("
+                    UPDATE players p
+                    JOIN (
+                        SELECT id, DENSE_RANK() OVER (ORDER BY score DESC, id ASC) as calculated_rank
+                        FROM players
+                        WHERE session_id = ?
+                    ) r ON p.id = r.id
+                    SET p.rank = r.calculated_rank
+                    WHERE p.session_id = ?
+                ");
+                $stmt->execute([$sessionId, $sessionId]);
+            }
+        } catch (\Throwable $e) {
+            error_log("Rank batch update notice: " . $e->getMessage());
         }
 
         if (!$wasInTransaction) {

@@ -138,7 +138,7 @@
         </div>
 
         <!-- 1. Lobby Phase Display -->
-        <div id="ui-waiting" style="display: none;" class="locked-message">
+        <div id="ui-waiting" class="locked-message">
             <h1 class="heading-lg" style="margin-bottom: 0.5rem;">You are in!</h1>
             <p style="color: var(--text-muted); font-size: 1.1rem;">Check your name on the host's screen.</p>
             <div class="loading-pulse"></div>

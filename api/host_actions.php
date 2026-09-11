@@ -65,7 +65,9 @@ if ($action === 'create') {
     // Create game session
     $stmt = $pdo->prepare("INSERT INTO game_sessions (quiz_id, pin, status) VALUES (?, ?, 'waiting')");
     $stmt->execute([$quizId, $pin]);
-    $newSessionId = $pdo->lastInsertId();
+    $newSessionId = (int)$pdo->lastInsertId();
+    GameCache::purge($newSessionId);
+    GameCache::invalidate($newSessionId);
     
     echo json_encode([
         'status' => 'success',
@@ -146,9 +148,18 @@ if ($action === 'start_question') {
         $nowMs = round(microtime(true) * 1000);
         $stmt = $pdo->prepare("UPDATE game_sessions SET status = 'question', current_question_started_at = ?, current_question_ended_at = NULL WHERE id = ?");
         $stmt->execute([$nowMs, $sessionId]);
+
+        $timeLimit = 20;
+        if (!empty($session['current_question_id'])) {
+            $stmtQ = $pdo->prepare("SELECT time_limit FROM questions WHERE id = ?");
+            $stmtQ->execute([$session['current_question_id']]);
+            $tl = $stmtQ->fetchColumn();
+            if ($tl) $timeLimit = (int)$tl;
+        }
         
         $pdo->commit();
         GameCache::invalidate((int)$sessionId);
+        GameCache::setQuestionExpiry((int)$sessionId, $nowMs + ($timeLimit * 1000));
         echo json_encode(['status' => 'success', 'message' => 'Question started']);
     } catch (Exception $e) {
         $pdo->rollBack();

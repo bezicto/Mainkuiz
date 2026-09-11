@@ -85,7 +85,68 @@ class GameCache {
             @unlink($stateFile);
         }
         
+        self::clearQuestionExpiry($sessionId);
+
         return $newVersion;
+    }
+
+    /**
+     * Set question expiration timestamp (milliseconds)
+     */
+    public static function setQuestionExpiry(int $sessionId, int $expiresAtMs): void {
+        self::init();
+        $key = "mk_exp_{$sessionId}";
+        if (self::$useApcu) {
+            apcu_store($key, $expiresAtMs, 120);
+        }
+
+        $expFile = self::$cacheDir . DIRECTORY_SEPARATOR . "exp_{$sessionId}.txt";
+        @file_put_contents($expFile, (string)$expiresAtMs, LOCK_EX);
+    }
+
+    /**
+     * Check if the active question has expired based on cached timestamp
+     */
+    public static function isQuestionExpired(int $sessionId): bool {
+        self::init();
+        $key = "mk_exp_{$sessionId}";
+        $expiresAtMs = 0;
+
+        if (self::$useApcu) {
+            $success = false;
+            $val = apcu_fetch($key, $success);
+            if ($success && is_numeric($val)) {
+                $expiresAtMs = (int)$val;
+            }
+        }
+
+        if (!$expiresAtMs) {
+            $expFile = self::$cacheDir . DIRECTORY_SEPARATOR . "exp_{$sessionId}.txt";
+            if (file_exists($expFile)) {
+                $c = @file_get_contents($expFile);
+                if ($c !== false && is_numeric(trim($c))) {
+                    $expiresAtMs = (int)trim($c);
+                }
+            }
+        }
+
+        if ($expiresAtMs > 0) {
+            $nowMs = round(microtime(true) * 1000);
+            return $nowMs >= $expiresAtMs;
+        }
+
+        return false;
+    }
+
+    /**
+     * Clear question expiration
+     */
+    public static function clearQuestionExpiry(int $sessionId): void {
+        self::init();
+        if (self::$useApcu) {
+            apcu_delete("mk_exp_{$sessionId}");
+        }
+        @unlink(self::$cacheDir . DIRECTORY_SEPARATOR . "exp_{$sessionId}.txt");
     }
 
     /**
@@ -143,8 +204,10 @@ class GameCache {
         if (self::$useApcu) {
             apcu_delete("mk_v_{$sessionId}");
             apcu_delete("mk_state_{$sessionId}");
+            apcu_delete("mk_exp_{$sessionId}");
         }
         @unlink(self::$cacheDir . DIRECTORY_SEPARATOR . "v_{$sessionId}.txt");
         @unlink(self::$cacheDir . DIRECTORY_SEPARATOR . "state_{$sessionId}.json");
+        @unlink(self::$cacheDir . DIRECTORY_SEPARATOR . "exp_{$sessionId}.txt");
     }
 }

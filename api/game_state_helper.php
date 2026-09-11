@@ -16,7 +16,7 @@ function get_game_state_data($pdo, $sessionId, $playerId = null, $clientVersion 
         return ['status' => 'error', 'message' => 'Game session not found'];
     }
 
-    $currentVersion = crc32($session['status'] . '_' . ($session['current_question_id'] ?? 0) . '_' . ($session['current_question_ended_at'] ?? 0));
+    $currentVersion = GameCache::getVersion($sessionId);
 
     // Fast return if client already has this version
     if ($playerId && $clientVersion !== null && (int)$clientVersion === (int)$currentVersion) {
@@ -209,9 +209,20 @@ function get_game_state_data($pdo, $sessionId, $playerId = null, $clientVersion 
     
     // Player-specific info retrieval (if requested)
     if ($playerId) {
-        $stmt = $pdo->prepare("SELECT id, nickname, score, streak, last_question_correct FROM players WHERE id = ? AND session_id = ?");
-        $stmt->execute([$playerId, $sessionId]);
-        $player = $stmt->fetch();
+        $player = null;
+        try {
+            $stmt = $pdo->prepare("SELECT id, nickname, score, streak, rank, last_question_correct FROM players WHERE id = ? AND session_id = ?");
+            $stmt->execute([$playerId, $sessionId]);
+            $player = $stmt->fetch();
+        } catch (\PDOException $e) {
+            // Graceful fallback if rank column is not yet present
+            $stmt = $pdo->prepare("SELECT id, nickname, score, streak, last_question_correct FROM players WHERE id = ? AND session_id = ?");
+            $stmt->execute([$playerId, $sessionId]);
+            $player = $stmt->fetch();
+            if ($player) {
+                $player['rank'] = 1;
+            }
+        }
         
         if ($player) {
             $hasAnswered = false;
@@ -229,15 +240,6 @@ function get_game_state_data($pdo, $sessionId, $playerId = null, $clientVersion 
                 }
             }
             
-            // Only calculate player rank when showing results, leaderboard, or podium!
-            // This avoids executing a count query for every player's poll during wait/question phases.
-            $rank = 1;
-            if (in_array($status, ['answers', 'leaderboard', 'podium'])) {
-                $stmt = $pdo->prepare("SELECT COUNT(*) + 1 FROM players WHERE session_id = ? AND score > ?");
-                $stmt->execute([$sessionId, $player['score']]);
-                $rank = (int)$stmt->fetchColumn();
-            }
-            
             $playerData = [
                 'id' => (int)$player['id'],
                 'nickname' => $player['nickname'],
@@ -247,7 +249,7 @@ function get_game_state_data($pdo, $sessionId, $playerId = null, $clientVersion 
                 'has_answered' => $hasAnswered,
                 'answer_correct' => $answerCorrect,
                 'points_earned' => $pointsEarned,
-                'rank' => $rank
+                'rank' => (int)($player['rank'] ?? 1)
             ];
         }
     }

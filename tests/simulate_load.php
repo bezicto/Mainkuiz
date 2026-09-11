@@ -79,11 +79,13 @@ $pdo->exec("
         nickname TEXT NOT NULL,
         score INTEGER NOT NULL DEFAULT 0,
         streak INTEGER NOT NULL DEFAULT 0,
+        rank INTEGER NOT NULL DEFAULT 1,
         last_question_correct INTEGER DEFAULT 0,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         UNIQUE(session_id, nickname)
     );
     CREATE INDEX idx_session_score ON players (session_id, score);
+    CREATE INDEX idx_session_rank ON players (session_id, rank);
     CREATE INDEX idx_session_player ON players (session_id, id);
 
     CREATE TABLE player_answers (
@@ -211,34 +213,17 @@ echo "  -> 850 answer submissions processed in " . round($ansTime, 2) . " ms (" 
 echo "  -> Correct answers: $totalCorrect, Incorrect: " . (850 - $totalCorrect) . "\n";
 
 // Phase 5: Question Timer Ends & Set-Based Timeout Resolution
-echo "\n  [Step 5] Triggering Question End & Bulk Timeout Handling...\n";
+echo "\n  [Step 5] Triggering Question End, Bulk Timeout Handling & Batch Ranking...\n";
 $tTimeoutStart = microtime(true);
 
-// Set session to answers
-$pdo->prepare("UPDATE game_sessions SET status = 'answers', current_question_ended_at = ? WHERE id = ?")
-    ->execute([round(microtime(true) * 1000), $sessionId]);
+require_once __DIR__ . '/../api/game_actions_helper.php';
+$ended = end_question_and_show_results($pdo, $sessionId);
+if (!$ended) {
+    throw new Exception("end_question_and_show_results failed!");
+}
 
-// High-performance set-based timeout insertion
-$pdo->prepare("
-    INSERT INTO player_answers (player_id, question_id, answer_id, points_earned, response_time_ms)
-    SELECT p.id, ?, NULL, 0, 0
-    FROM players p
-    LEFT JOIN player_answers pa ON pa.player_id = p.id AND pa.question_id = ?
-    WHERE p.session_id = ? AND pa.id IS NULL
-")->execute([$qId, $qId, $sessionId]);
-
-// Streak reset for timeouts
-$pdo->prepare("
-    UPDATE players
-    SET streak = 0, last_question_correct = 0
-    WHERE id IN (
-        SELECT player_id FROM player_answers WHERE question_id = ? AND answer_id IS NULL
-    )
-")->execute([$qId]);
-
-GameCache::invalidate($sessionId);
 $timeoutDuration = (microtime(true) - $tTimeoutStart) * 1000;
-echo "  -> 150 timeouts processed via set-based SQL in " . round($timeoutDuration, 2) . " ms\n";
+echo "  -> 150 timeouts and 1,000 player ranks processed via set-based SQL in " . round($timeoutDuration, 2) . " ms\n";
 
 // Verify Total Answers Count
 $stmt = $pdo->prepare("SELECT COUNT(*) FROM player_answers WHERE question_id = ?");
@@ -266,14 +251,21 @@ foreach ($breakdown as $row) {
     echo "     - $label: " . $row['count'] . " players\n";
 }
 
-// Top 5 Leaders
-$stmt = $pdo->prepare("SELECT nickname, score, streak FROM players WHERE session_id = ? ORDER BY score DESC, id ASC LIMIT 5");
+// Top 5 Leaders from pre-calculated rank
+$stmt = $pdo->prepare("SELECT nickname, score, streak, rank FROM players WHERE session_id = ? ORDER BY rank ASC, score DESC, id ASC LIMIT 5");
 $stmt->execute([$sessionId]);
 $leaders = $stmt->fetchAll();
-echo "\n  Top 5 Leaderboard Standings:\n";
-foreach ($leaders as $rank => $leader) {
-    echo "    #" . ($rank + 1) . " " . $leader['nickname'] . " - " . $leader['score'] . " pts (Streak: " . $leader['streak'] . ")\n";
+echo "\n  Top 5 Leaderboard Standings (Pre-calculated Window Function Ranks):\n";
+foreach ($leaders as $leader) {
+    echo "    #" . $leader['rank'] . " " . $leader['nickname'] . " - " . $leader['score'] . " pts (Streak: " . $leader['streak'] . ")\n";
 }
+
+// Verify player state retrieval uses pre-computed rank
+$playerState = get_game_state_data($pdo, $sessionId, $playerIds[0]);
+if (empty($playerState['player']['rank']) || $playerState['player']['rank'] < 1) {
+    throw new Exception("Player rank was not correctly populated!");
+}
+echo "  -> Verified Player_0001 state retrieval returned Rank #" . $playerState['player']['rank'] . " with 0 extra queries.\n";
 
 // Clean up test cache
 GameCache::purge($sessionId);

@@ -48,7 +48,6 @@ if ($action === 'join') {
         $stmt = $pdo->prepare("INSERT INTO players (session_id, nickname, score, streak) VALUES (?, ?, 0, 0)");
         $stmt->execute([$session['id'], $nickname]);
         $playerId = $pdo->lastInsertId();
-        GameCache::invalidate((int)$session['id']);
         
         echo json_encode([
             'status' => 'success',
@@ -163,38 +162,15 @@ if ($action === 'submit_answer') {
             WHERE id = ?
         ");
         $stmt->execute([$pointsEarned, $newStreak, $isCorrect, $playerId]);
-        
-        // High-performance index-assisted completion check
-        $stmt = $pdo->prepare("
-            SELECT 
-                (SELECT COUNT(*) FROM players WHERE session_id = ?) as total_players,
-                (SELECT COUNT(*) FROM player_answers pa JOIN players p ON pa.player_id = p.id WHERE p.session_id = ? AND pa.question_id = ?) as answered_players
-        ");
-        $stmt->execute([$player['session_id'], $player['session_id'], $questionId]);
-        $counts = $stmt->fetch();
-        
-        $allAnswered = false;
-        if ($counts && (int)$counts['total_players'] > 0 && (int)$counts['answered_players'] >= (int)$counts['total_players']) {
-            $allAnswered = true;
-        }
 
         $pdo->commit();
 
-        // Increment session cache revision so host live counter updates
-        GameCache::invalidate((int)$player['session_id']);
-        
-        // If all players have answered, immediately transition game session to results!
-        if ($allAnswered) {
-            end_question_and_show_results($pdo, $player['session_id']);
-        }
-        
         echo json_encode([
             'status' => 'success',
             'is_correct' => $isCorrect,
             'points_earned' => $pointsEarned,
             'new_score' => (int)$player['score'] + $pointsEarned,
-            'streak' => $newStreak,
-            'all_answered' => $allAnswered
+            'streak' => $newStreak
         ]);
         
     } catch (Exception $e) {
