@@ -12,6 +12,12 @@ $charset = 'utf8mb4';
 
 $admin_pass = 'abc123';
 
+// System administrator setting: participant limit per game session
+$max_participants = (int)(getenv('MAX_PARTICIPANTS') ?: 50);
+if (!defined('MAX_PARTICIPANTS')) {
+    define('MAX_PARTICIPANTS', $max_participants);
+}
+
 if ($socket) {
     $dsn = "mysql:unix_socket=$socket;dbname=$db;charset=$charset";
 } else {

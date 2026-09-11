@@ -109,6 +109,9 @@
                     if (data.session.status !== 'waiting') {
                         document.getElementById('form-title').innerText = 'Enter Game PIN';
                         showError('This quiz session has already started!');
+                    } else if (data.session.max_players && data.session.total_players >= data.session.max_players) {
+                        document.getElementById('form-title').innerText = 'Enter Game PIN';
+                        showError('This game lobby is full (maximum ' + data.session.max_players + ' players allowed).');
                     } else {
                         validatedPin = pinVal;
                         // Swap inputs

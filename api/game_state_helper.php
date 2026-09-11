@@ -274,6 +274,7 @@ function get_game_state_data($pdo, $sessionId, $playerId = null, $clientVersion 
             'server_time' => round(microtime(true) * 1000),
             'answers' => $answers,
             'total_players' => $totalPlayers,
+            'max_players' => defined('MAX_PARTICIPANTS') ? MAX_PARTICIPANTS : ($GLOBALS['max_participants'] ?? 50),
             'total_submitted' => $totalSubmitted,
             'answers_count' => $answersCount,
             'players_list' => $playersList

@@ -148,6 +148,7 @@ Mainkuiz supports 12-factor cloud deployment via environment variables. You can 
 | `DB_USER` | Database user | `kashoot` |
 | `DB_PASS` | Database password | `abc1234` |
 | `DB_SOCKET` | Database Unix socket path (optional) | `null` |
+| `MAX_PARTICIPANTS` | Maximum allowed participants per session | `50` |
 
 In Apache VirtualHost:
 ```apache

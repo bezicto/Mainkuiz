@@ -43,6 +43,20 @@ if ($action === 'join') {
         exit;
     }
     
+    // Check participant limit configured in db.php
+    $maxLimit = defined('MAX_PARTICIPANTS') ? MAX_PARTICIPANTS : ($max_participants ?? 50);
+    $stmt = $pdo->prepare("SELECT COUNT(*) FROM players WHERE session_id = ?");
+    $stmt->execute([$session['id']]);
+    $currentCount = (int)$stmt->fetchColumn();
+
+    if ($currentCount >= $maxLimit) {
+        echo json_encode([
+            'status' => 'error',
+            'message' => "Game lobby is full! Maximum limit of {$maxLimit} participants reached."
+        ]);
+        exit;
+    }
+    
     try {
         // Insert player
         $stmt = $pdo->prepare("INSERT INTO players (session_id, nickname, score, streak) VALUES (?, ?, 0, 0)");

@@ -296,8 +296,11 @@ $lanHost = $detectedLanIp ? ($detectedLanIp . $portSuffix) : null;
             <h1 class="heading-lg" style="font-size: 1.8rem; color: var(--text-muted); margin-bottom: 1rem;">Waiting for players to join...</h1>
             <div class="lobby-stats">
                 <div>
-                    <div id="lobby-player-count" class="lobby-stat-val"><?= $initialPlayerCount ?></div>
+                    <div class="lobby-stat-val">
+                        <span id="lobby-player-count"><?= $initialPlayerCount ?></span><span style="font-size: 1.5rem; opacity: 0.6; font-weight: normal;"> / <?= defined('MAX_PARTICIPANTS') ? MAX_PARTICIPANTS : ($max_participants ?? 50) ?></span>
+                    </div>
                     <div>Participants</div>
+                    <div id="lobby-full-badge" style="display: <?= ($initialPlayerCount >= (defined('MAX_PARTICIPANTS') ? MAX_PARTICIPANTS : ($max_participants ?? 50))) ? 'inline-block' : 'none' ?>; margin-top: 0.5rem; padding: 0.25rem 0.75rem; border-radius: 9999px; background: rgba(239, 68, 68, 0.2); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.4); font-size: 0.85rem; font-weight: 600;">Lobby Full (Limit Reached)</div>
                 </div>
             </div>
             
@@ -743,9 +746,14 @@ $lanHost = $detectedLanIp ? ($detectedLanIp . $portSuffix) : null;
         }
 
         // Phase: Lobby Wait
+        const maxParticipants = <?= defined('MAX_PARTICIPANTS') ? MAX_PARTICIPANTS : ($max_participants ?? 50) ?>;
         let renderedPlayerIds = new Set();
         function updateLobbyUI(players, totalCount) {
             document.getElementById('lobby-player-count').innerText = totalCount;
+            const fullBadge = document.getElementById('lobby-full-badge');
+            if (fullBadge) {
+                fullBadge.style.display = totalCount >= maxParticipants ? 'inline-block' : 'none';
+            }
             const container = document.getElementById('lobby-nicknames');
             if (!players || !Array.isArray(players)) return;
 
