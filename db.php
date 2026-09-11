@@ -10,6 +10,8 @@ $port = getenv('DB_PORT') ?: '3306';
 $socket = getenv('DB_SOCKET') ?: null;
 $charset = 'utf8mb4';
 
+$admin_pass = 'abc123';
+
 if ($socket) {
     $dsn = "mysql:unix_socket=$socket;dbname=$db;charset=$charset";
 } else {

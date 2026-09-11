@@ -12,7 +12,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['login'])) {
     $password = $_POST['password'] ?? '';
 
     // Simple admin credentials
-    if ($username === 'admin' && $password === 'admin123') {
+    if ($username === 'admin' && $password === $admin_pass) {
         $_SESSION['admin_logged_in'] = true;
         header('Location: index.php');
         exit;
