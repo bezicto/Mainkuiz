@@ -593,14 +593,14 @@ $lanHost = $detectedLanIp ? ($detectedLanIp . $portSuffix) : null;
             }
         }
 
-        // 1. SSE Connection & Polling Fallback for Game State
+        // 1. Host State Synchronization (Direct & Resilient)
         let eventSource = null;
         let fallbackPollTimer = null;
         let sseHealthy = false;
-        let sseWatchdog = null;
+        let lastSsePacketTime = 0;
 
-        function fetchStateDirect() {
-            fetch('../api/game_state.php?session_id=' + sessionId)
+        function fetchStateDirect(force = false) {
+            fetch('../api/game_state.php?session_id=' + sessionId + (force ? '&force=1' : ''))
                 .then(res => res.json())
                 .then(data => {
                     if (data && data.status === 'success' && data.session) {
@@ -610,11 +610,12 @@ $lanHost = $detectedLanIp ? ($detectedLanIp . $portSuffix) : null;
                 .catch(err => console.warn('Direct fetch state notice:', err));
         }
 
+        // Resilient Fallback Poller: Runs every 1.5s to guarantee the host screen never gets stuck
         function startFallbackPolling() {
             if (fallbackPollTimer) return;
-            console.warn('Activating fallback polling mechanism for game state.');
-            fetchStateDirect();
-            fallbackPollTimer = setInterval(fetchStateDirect, 1500);
+            fallbackPollTimer = setInterval(() => {
+                fetchStateDirect(false);
+            }, 1500);
         }
 
         function stopFallbackPolling() {
@@ -624,19 +625,15 @@ $lanHost = $detectedLanIp ? ($detectedLanIp . $portSuffix) : null;
             }
         }
 
+
         function startStreaming() {
             if (eventSource) {
                 eventSource.close();
             }
             sseHealthy = false;
 
-            // Watchdog: If SSE does not receive an event within 3 seconds, start fallback polling
-            clearTimeout(sseWatchdog);
-            sseWatchdog = setTimeout(() => {
-                if (!sseHealthy) {
-                    startFallbackPolling();
-                }
-            }, 3000);
+            // Start resilient fallback polling immediately
+            startFallbackPolling();
 
             eventSource = new EventSource('../api/game_stream.php?session_id=' + sessionId);
             eventSource.onmessage = function(event) {
@@ -644,7 +641,7 @@ $lanHost = $detectedLanIp ? ($detectedLanIp . $portSuffix) : null;
                     const data = JSON.parse(event.data);
                     if (data.status === 'success') {
                         sseHealthy = true;
-                        stopFallbackPolling();
+                        lastSsePacketTime = Date.now();
                         handleStateTransition(data.session);
                     }
                 } catch (e) {
@@ -655,15 +652,14 @@ $lanHost = $detectedLanIp ? ($detectedLanIp . $portSuffix) : null;
                 startStreaming();
             });
             eventSource.onerror = function(err) {
-                console.warn('SSE stream error, using fallback polling:', err);
+                console.warn('SSE stream notice, utilizing fallback polling:', err);
                 eventSource.close();
-                startFallbackPolling();
-                setTimeout(startStreaming, 5000);
+                fetchStateDirect();
+                setTimeout(startStreaming, 3000);
             };
         }
 
         function stopStreaming() {
-            clearTimeout(sseWatchdog);
             if (eventSource) {
                 eventSource.close();
                 eventSource = null;
@@ -704,6 +700,13 @@ $lanHost = $detectedLanIp ? ($detectedLanIp . $portSuffix) : null;
             if (newStatus !== 'podium') {
                 podiumRendered = false;
             }
+            if (newStatus !== 'question') {
+                if (questionTimerInterval) {
+                    clearInterval(questionTimerInterval);
+                    questionTimerInterval = null;
+                }
+                isTransitioningToResults = false;
+            }
 
             currentStatus = newStatus;
             
@@ -740,28 +743,45 @@ $lanHost = $detectedLanIp ? ($detectedLanIp . $portSuffix) : null;
         }
 
         // Phase: Lobby Wait
+        let renderedPlayerIds = new Set();
         function updateLobbyUI(players, totalCount) {
             document.getElementById('lobby-player-count').innerText = totalCount;
             const container = document.getElementById('lobby-nicknames');
+            if (!players || !Array.isArray(players)) return;
+
+            // Reconcile badges smoothly without clearing container if unchanged
+            const isDifferent = players.length !== renderedPlayerIds.size || players.some(p => !renderedPlayerIds.has(p.id));
+            if (!isDifferent) return;
+
             container.innerHTML = '';
-            
-            players.forEach((p, idx) => {
+            renderedPlayerIds.clear();
+            players.slice(0, 60).forEach((p, idx) => {
+                renderedPlayerIds.add(p.id);
                 const badge = document.createElement('div');
                 badge.className = 'nickname-badge';
                 badge.style.setProperty('--delay', (idx % 5) * 0.5);
                 badge.innerText = p.nickname;
                 container.appendChild(badge);
             });
+
+            if (totalCount > 60) {
+                const moreBadge = document.createElement('div');
+                moreBadge.className = 'nickname-badge';
+                moreBadge.style.opacity = '0.7';
+                moreBadge.innerText = `+${totalCount - 60} more`;
+                container.appendChild(moreBadge);
+            }
         }
+
 
         // Phase: 3s Countdown Animation
         function runLobbyCountdown(session) {
-            stopStreaming(); // Pause state stream while hosting local countdown
             let val = 3;
             const timerBox = document.getElementById('countdown-timer-box');
             timerBox.innerText = val;
             gameAudio.playTick();
 
+            if (countdownTimer) clearInterval(countdownTimer);
             countdownTimer = setInterval(() => {
                 val--;
                 if (val > 0) {
@@ -769,10 +789,70 @@ $lanHost = $detectedLanIp ? ($detectedLanIp . $portSuffix) : null;
                     gameAudio.playTick();
                 } else {
                     clearInterval(countdownTimer);
+                    countdownTimer = null;
                     // Automatically trigger backend start_question
                     triggerHostAction('start_question');
                 }
             }, 1000);
+        }
+
+        let questionTimerInterval = null;
+        let activeTimerQuestionId = null;
+        let isTransitioningToResults = false;
+        let currentRenderedQuestionId = null;
+
+        // Smooth local countdown timer (synchronizes with server start time and avoids buffering stutter)
+        function syncQuestionTimer(session) {
+            const timerBox = document.getElementById('question-timer-circle');
+            if (!timerBox) return;
+
+            const startedAt = Number(session.current_question_started_at) || Date.now();
+            const timeLimit = Number(session.time_limit) || 20;
+            const serverNow = Number(session.server_time) || Date.now();
+            const clientOffset = Date.now() - serverNow; // offset between client and server
+
+
+            function tick() {
+                if (currentStatus !== 'question') {
+                    if (questionTimerInterval) {
+                        clearInterval(questionTimerInterval);
+                        questionTimerInterval = null;
+                    }
+                    return;
+                }
+
+                const adjustedNow = Date.now() - clientOffset;
+                const elapsedSec = Math.max(0, (adjustedNow - startedAt) / 1000);
+                const remaining = Math.max(0, Math.ceil(timeLimit - elapsedSec));
+
+                timerBox.innerText = remaining;
+
+                // Tension tick
+                if (remaining <= 5 && remaining > 0) {
+                    gameAudio.playTick();
+                }
+
+                // Time expired!
+                if (remaining <= 0) {
+                    if (questionTimerInterval) {
+                        clearInterval(questionTimerInterval);
+                        questionTimerInterval = null;
+                    }
+                    if (currentStatus === 'question' && !isTransitioningToResults) {
+                        isTransitioningToResults = true;
+                        triggerHostAction('show_results');
+                    }
+                }
+            }
+
+            // Start a new interval when entering a new question
+            if (activeTimerQuestionId !== session.current_question_id || !questionTimerInterval) {
+                activeTimerQuestionId = session.current_question_id;
+                isTransitioningToResults = false;
+                if (questionTimerInterval) clearInterval(questionTimerInterval);
+                tick();
+                questionTimerInterval = setInterval(tick, 250);
+            }
         }
 
         // Phase: Active Question Display
@@ -780,38 +860,43 @@ $lanHost = $detectedLanIp ? ($detectedLanIp . $portSuffix) : null;
             document.getElementById('q-counter-display').innerText = `Question ${session.order_num} of ${session.total_questions}`;
             document.getElementById('question-text-display').innerText = session.question_text;
             
-            const timerBox = document.getElementById('question-timer-circle');
-            timerBox.innerText = session.time_remaining;
-            
-            // Sound tick for tension
-            if (session.time_remaining <= 5 && session.time_remaining > 0) {
-                gameAudio.playTick();
-            }
-
             document.getElementById('submitted-count').innerText = session.total_submitted;
             document.getElementById('lobby-active-count').innerText = session.total_players;
 
-            // Display options (shapes only, matching classical Kahoot design)
-            const grid = document.getElementById('question-options-grid');
-            grid.innerHTML = '';
-            
-            const colors = ['red', 'blue', 'yellow', 'green'];
-            const shapes = ['▲', '◆', '●', '■'];
-            
-            session.answers.forEach((ans, idx) => {
-                const color = colors[idx] ?? 'red';
-                const shape = shapes[idx] ?? '▲';
-                
-                const card = document.createElement('div');
-                card.className = `answer-card ${color}`;
-                card.style.cursor = 'default';
-                card.innerHTML = `<span class="option-shape">${shape}</span> <span>${ans.answer_text}</span>`;
-                grid.appendChild(card);
-            });
+            // Start or sync the smooth local countdown timer
+            syncQuestionTimer(session);
 
-            // Auto-trigger show_results when time runs out
-            if (session.time_remaining <= 0 && currentStatus === 'question') {
-                triggerHostAction('show_results');
+            // Display options (only re-render DOM if question changed to avoid layout thrashing)
+            if (currentRenderedQuestionId !== session.current_question_id) {
+                currentRenderedQuestionId = session.current_question_id;
+                const grid = document.getElementById('question-options-grid');
+                grid.innerHTML = '';
+                
+                const colors = ['red', 'blue', 'yellow', 'green'];
+                const shapes = ['▲', '◆', '●', '■'];
+                
+                session.answers.forEach((ans, idx) => {
+                    const color = colors[idx] ?? 'red';
+                    const shape = shapes[idx] ?? '▲';
+                    
+                    const card = document.createElement('div');
+                    card.className = `answer-card ${color}`;
+                    card.style.cursor = 'default';
+                    card.innerHTML = `<span class="option-shape">${shape}</span> <span>${ans.answer_text}</span>`;
+                    grid.appendChild(card);
+                });
+            }
+
+            // Auto-trigger show_results when ALL active participants have submitted answers!
+            if (session.total_players > 0 && session.total_submitted >= session.total_players) {
+                if (currentStatus === 'question' && !isTransitioningToResults) {
+                    isTransitioningToResults = true;
+                    if (questionTimerInterval) {
+                        clearInterval(questionTimerInterval);
+                        questionTimerInterval = null;
+                    }
+                    triggerHostAction('show_results');
+                }
             }
         }
 
@@ -971,16 +1056,15 @@ $lanHost = $detectedLanIp ? ($detectedLanIp . $portSuffix) : null;
             })
             .then(res => res.json())
             .then(data => {
-                if (data.status === 'success') {
-                    if (!eventSource) {
-                        startStreaming();
-                    }
-                } else {
-                    console.error('Action failed:', data.message);
-                }
+                // Immediately refresh host state to guarantee zero-latency UI transition
+                fetchStateDirect(true);
             })
-            .catch(err => console.error('Network Error:', err));
+            .catch(err => {
+                console.error('Network Error:', err);
+                fetchStateDirect(true);
+            });
         }
+
 
         // Initialize Audio context trigger on first click anywhere
         document.body.addEventListener('click', function() {

@@ -49,8 +49,9 @@ CREATE TABLE game_sessions (
     current_question_started_at BIGINT NULL, -- Unix timestamp in milliseconds for time calculations
     current_question_ended_at BIGINT NULL, -- Unix timestamp in milliseconds when time limit runs out or all answered
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_sessions_status (status),
     CONSTRAINT fk_game_sessions_quiz FOREIGN KEY (quiz_id) REFERENCES quizzes(id) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci ROW_FORMAT=DYNAMIC;
 
 -- Players Table (participants inside a game session)
 CREATE TABLE players (
@@ -63,8 +64,9 @@ CREATE TABLE players (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE KEY unique_nick_session (session_id, nickname),
     INDEX idx_session_score (session_id, score),
+    INDEX idx_session_player (session_id, id),
     CONSTRAINT fk_players_session FOREIGN KEY (session_id) REFERENCES game_sessions(id) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci ROW_FORMAT=DYNAMIC;
 
 -- Player Answers Table (tracks submissions and speeds)
 CREATE TABLE player_answers (
@@ -76,6 +78,8 @@ CREATE TABLE player_answers (
     response_time_ms INT NOT NULL DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE KEY unique_player_question (player_id, question_id),
+    INDEX idx_pa_question_answer (question_id, answer_id),
+    INDEX idx_pa_question_player (question_id, player_id),
     CONSTRAINT fk_player_answers_player FOREIGN KEY (player_id) REFERENCES players(id) ON DELETE CASCADE,
     CONSTRAINT fk_player_answers_question FOREIGN KEY (question_id) REFERENCES questions(id) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci ROW_FORMAT=DYNAMIC;

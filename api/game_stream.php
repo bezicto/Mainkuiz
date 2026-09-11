@@ -2,8 +2,8 @@
 // api/game_stream.php
 // Server-Sent Events (SSE) stream for real-time game updates.
 
-// Disable time limit
-set_time_limit(0);
+// Disable script time limit if server allows
+@set_time_limit(0);
 
 // Disable compression and output buffering to prevent proxy/server buffering
 @ini_set('zlib.output_compression', 'Off');
@@ -16,21 +16,24 @@ header('Content-Type: text/event-stream');
 header('Cache-Control: no-cache, no-transform');
 header('Connection: keep-alive');
 header('X-Accel-Buffering: no');
+header('X-LiteSpeed-Buffer: no');
+header('Content-Encoding: none');
 
 // Clear existing output buffers
 while (ob_get_level() > 0) {
     ob_end_flush();
 }
 
-// Send 2KB initial padding to force-flush proxy buffers (Nginx, Cloudflare, cPanel)
-echo ":" . str_repeat(" ", 2048) . "\n\n";
+// Send 4KB initial padding comment to immediately clear proxy buffers (Nginx, LiteSpeed, Cloudflare)
+echo ":" . str_repeat(" ", 4096) . "\n\n";
 flush();
 
 require_once '../db.php';
 require_once 'game_state_helper.php';
+require_once 'game_cache.php';
 
-$sessionId = $_GET['session_id'] ?? null;
-$playerId = $_GET['player_id'] ?? null;
+$sessionId = (int)($_GET['session_id'] ?? 0);
+$playerId = isset($_GET['player_id']) ? (int)$_GET['player_id'] : null;
 
 if (!$sessionId) {
     echo "event: error\n";
@@ -40,6 +43,7 @@ if (!$sessionId) {
 }
 
 // Track states to only push on changes
+$lastVersion = -1;
 $lastStatus = '';
 $lastQuestionId = null;
 $lastTotalPlayers = -1;
@@ -49,7 +53,8 @@ $lastPlayerHasAnswered = null;
 
 $lastHeartbeat = time();
 $startTime = time();
-$maxExecutionTime = 600; // 10 minutes session duration before forcing reconnect
+// Set 25-second cycle before clean reconnect to stay safely under shared host 30s max_execution_time
+$maxExecutionTime = 25;
 
 while (true) {
     // Check if client aborted connection
@@ -57,82 +62,73 @@ while (true) {
         break;
     }
 
-    // Force periodic reconnect to prevent orphan PHP processes accumulating
+    // Proactively cycle connection to prevent 504 gateway timeouts on shared hosting
     if (time() - $startTime > $maxExecutionTime) {
         echo "event: reconnect\n";
         echo "data: {}\n\n";
+        echo ":" . str_repeat(" ", 4096) . "\n\n";
         flush();
         break;
     }
 
-    // Fetch optimized game state
-    $state = get_game_state_data($pdo, $sessionId, $playerId);
+    // Fast primary key check for session state version
+    $stmt = $pdo->prepare("SELECT status, current_question_id, current_question_ended_at FROM game_sessions WHERE id = ?");
+    $stmt->execute([$sessionId]);
+    $sess = $stmt->fetch();
 
-    if ($state['status'] === 'error') {
+    if (!$sess) {
         echo "event: error\n";
-        echo "data: " . json_encode(['message' => $state['message']]) . "\n\n";
+        echo "data: " . json_encode(['message' => 'Game session not found']) . "\n\n";
         flush();
         break;
     }
 
-    $session = $state['session'];
-    $player = $state['player'];
-
-    $changed = false;
-
-    // Check if session status or active question has changed
-    if ($session['status'] !== $lastStatus ||
-        $session['current_question_id'] !== $lastQuestionId) {
-        $changed = true;
-    }
-
-    // Check client specific changes
-    if ($playerId) {
-        if ($player) {
-            if ($player['score'] !== $lastPlayerScore ||
-                $player['has_answered'] !== $lastPlayerHasAnswered) {
-                $changed = true;
-            }
-        }
-    } else {
-        // Host needs to check participant counts and answer submission counts
-        if ($session['total_players'] !== $lastTotalPlayers ||
-            $session['total_submitted'] !== $lastTotalSubmitted) {
-            $changed = true;
+    $extraKey = '';
+    // For host: track lobby participant count or active answer submissions
+    if (!$playerId) {
+        if ($sess['status'] === 'waiting') {
+            $stmt = $pdo->prepare("SELECT COUNT(*) FROM players WHERE session_id = ?");
+            $stmt->execute([$sessionId]);
+            $extraKey = '_' . $stmt->fetchColumn();
+        } else if ($sess['status'] === 'question' && $sess['current_question_id']) {
+            $stmt = $pdo->prepare("SELECT COUNT(*) FROM player_answers pa JOIN players p ON pa.player_id = p.id WHERE p.session_id = ? AND pa.question_id = ?");
+            $stmt->execute([$sessionId, $sess['current_question_id']]);
+            $extraKey = '_' . $stmt->fetchColumn();
         }
     }
 
-    // Always push updates during an active question phase to sync the countdown timer
-    if ($session['status'] === 'question') {
-        $changed = true;
-    }
+    $currVersion = crc32($sess['status'] . '_' . ($sess['current_question_id'] ?? 0) . '_' . ($sess['current_question_ended_at'] ?? 0) . $extraKey);
 
-    if ($changed) {
+    // Only query full database state when version changes or on initial connect
+    if ($currVersion !== $lastVersion || $lastVersion === -1) {
+
+        // Fetch optimized game state
+        $state = get_game_state_data($pdo, $sessionId, $playerId);
+
+        if ($state['status'] === 'error') {
+            echo "event: error\n";
+            echo "data: " . json_encode(['message' => $state['message']]) . "\n\n";
+            flush();
+            break;
+        }
+
         echo "data: " . json_encode($state) . "\n\n";
+        echo ":" . str_repeat(" ", 4096) . "\n\n";
         flush();
 
-        // Update tracking variables
-        $lastStatus = $session['status'];
-        $lastQuestionId = $session['current_question_id'];
-        
-        if ($playerId && $player) {
-            $lastPlayerScore = $player['score'];
-            $lastPlayerHasAnswered = $player['has_answered'];
-        } else {
-            $lastTotalPlayers = $session['total_players'];
-            $lastTotalSubmitted = $session['total_submitted'];
-        }
-        
+        $lastVersion = $currVersion;
         $lastHeartbeat = time();
     } else {
-        // Send a keep-alive heartbeat comment every 15 seconds to prevent browser/proxy connection timeout
-        if (time() - $lastHeartbeat > 15) {
+        // Send a keep-alive heartbeat comment every 10 seconds
+        if (time() - $lastHeartbeat > 10) {
             echo ": keep-alive\n\n";
+            echo ":" . str_repeat(" ", 4096) . "\n\n";
             flush();
             $lastHeartbeat = time();
         }
     }
 
-    // Wait 1 second before querying state again (lowers DB polling storm)
-    sleep(1);
+    // High responsiveness with minimal CPU impact: check cache every 350ms
+    usleep(350000);
 }
+

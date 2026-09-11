@@ -4,6 +4,7 @@
 
 header('Content-Type: application/json');
 require_once '../db.php';
+require_once 'game_actions_helper.php';
 
 $action = $_POST['action'] ?? $_GET['action'] ?? null;
 
@@ -47,6 +48,7 @@ if ($action === 'join') {
         $stmt = $pdo->prepare("INSERT INTO players (session_id, nickname, score, streak) VALUES (?, ?, 0, 0)");
         $stmt->execute([$session['id'], $nickname]);
         $playerId = $pdo->lastInsertId();
+        GameCache::invalidate((int)$session['id']);
         
         echo json_encode([
             'status' => 'success',
@@ -80,64 +82,62 @@ if ($action === 'submit_answer') {
     try {
         $pdo->beginTransaction();
         
-        // Check player and session status inside transaction
-        $stmt = $pdo->prepare("
-            SELECT p.*, gs.status as session_status, gs.current_question_started_at, gs.current_question_id 
-            FROM players p 
-            JOIN game_sessions gs ON p.session_id = gs.id 
-            WHERE p.id = ? 
-            FOR UPDATE
-        ");
+        // 1. Lock ONLY the player row (Prevents global game_sessions serialization bottleneck)
+        $stmt = $pdo->prepare("SELECT * FROM players WHERE id = ? FOR UPDATE");
         $stmt->execute([$playerId]);
         $player = $stmt->fetch();
         
         if (!$player) {
             throw new Exception('Player session not found');
         }
+
+        // 2. Non-locking check on game session state
+        $stmt = $pdo->prepare("SELECT status, current_question_started_at, current_question_id FROM game_sessions WHERE id = ?");
+        $stmt->execute([$player['session_id']]);
+        $session = $stmt->fetch();
         
-        // Check if the submitted question is the active one
-        if ($player['current_question_id'] != $questionId || $player['session_status'] !== 'question') {
+        if (!$session || $session['current_question_id'] != $questionId || $session['status'] !== 'question') {
             throw new Exception('Question is not active or time is up');
         }
         
-        // Check if already answered (locking check to prevent double submissions)
-        $stmt = $pdo->prepare("SELECT id FROM player_answers WHERE player_id = ? AND question_id = ? FOR UPDATE");
+        // 3. Fast double submission check
+        $stmt = $pdo->prepare("SELECT id FROM player_answers WHERE player_id = ? AND question_id = ?");
         $stmt->execute([$playerId, $questionId]);
         if ($stmt->fetch()) {
             throw new Exception('You have already submitted an answer for this question');
         }
         
-        // Fetch question and answer to verify correctness
-        $stmt = $pdo->prepare("SELECT * FROM questions WHERE id = ?");
-        $stmt->execute([$questionId]);
-        $question = $stmt->fetch();
+        // 4. Combined question and answer lookup in a single query
+        $stmt = $pdo->prepare("
+            SELECT q.points, q.time_limit, a.is_correct 
+            FROM questions q 
+            JOIN answers a ON a.question_id = q.id 
+            WHERE q.id = ? AND a.id = ?
+        ");
+        $stmt->execute([$questionId, $answerId]);
+        $qa = $stmt->fetch();
         
-        $stmt = $pdo->prepare("SELECT * FROM answers WHERE id = ? AND question_id = ?");
-        $stmt->execute([$answerId, $questionId]);
-        $answer = $stmt->fetch();
-        
-        if (!$question || !$answer) {
+        if (!$qa) {
             throw new Exception('Invalid question or answer');
         }
         
-        $isCorrect = (int)$answer['is_correct'];
+        $isCorrect = (int)$qa['is_correct'];
+        $pointsMax = (int)$qa['points'];
+        $timeLimit = (int)$qa['time_limit'];
         
         // Calculate response time in ms
         $nowMs = round(microtime(true) * 1000);
-        $startedAtMs = (float)$player['current_question_started_at'];
+        $startedAtMs = (float)$session['current_question_started_at'];
         $responseTimeMs = max(0, $nowMs - $startedAtMs);
-        $timeLimitMs = $question['time_limit'] * 1000;
+        $timeLimitMs = $timeLimit * 1000;
         
         $pointsEarned = 0;
         $newStreak = 0;
         
         if ($isCorrect) {
             // Point formula: baseline points, adjusted for response speed
-            // Fraction of time elapsed: 0 (instant) to 1 (at deadline)
             $fraction = min(1.0, max(0.0, $responseTimeMs / $timeLimitMs));
-            
-            // Instant answer = 100% of max points, answering at deadline = 50% of max points
-            $basePoints = round($question['points'] * (1 - ($fraction * 0.5)));
+            $basePoints = round($pointsMax * (1 - ($fraction * 0.5)));
             
             // Streak bonus calculations: +100 points per streak level (max 500 bonus points)
             $currentStreak = (int)$player['streak'];
@@ -164,14 +164,37 @@ if ($action === 'submit_answer') {
         ");
         $stmt->execute([$pointsEarned, $newStreak, $isCorrect, $playerId]);
         
+        // High-performance index-assisted completion check
+        $stmt = $pdo->prepare("
+            SELECT 
+                (SELECT COUNT(*) FROM players WHERE session_id = ?) as total_players,
+                (SELECT COUNT(*) FROM player_answers pa JOIN players p ON pa.player_id = p.id WHERE p.session_id = ? AND pa.question_id = ?) as answered_players
+        ");
+        $stmt->execute([$player['session_id'], $player['session_id'], $questionId]);
+        $counts = $stmt->fetch();
+        
+        $allAnswered = false;
+        if ($counts && (int)$counts['total_players'] > 0 && (int)$counts['answered_players'] >= (int)$counts['total_players']) {
+            $allAnswered = true;
+        }
+
         $pdo->commit();
+
+        // Increment session cache revision so host live counter updates
+        GameCache::invalidate((int)$player['session_id']);
+        
+        // If all players have answered, immediately transition game session to results!
+        if ($allAnswered) {
+            end_question_and_show_results($pdo, $player['session_id']);
+        }
         
         echo json_encode([
             'status' => 'success',
             'is_correct' => $isCorrect,
             'points_earned' => $pointsEarned,
             'new_score' => (int)$player['score'] + $pointsEarned,
-            'streak' => $newStreak
+            'streak' => $newStreak,
+            'all_answered' => $allAnswered
         ]);
         
     } catch (Exception $e) {

@@ -2,7 +2,11 @@
 // api/game_state_helper.php
 // Optimized game state retrieval function to avoid redundant database queries.
 
-function get_game_state_data($pdo, $sessionId, $playerId = null) {
+require_once __DIR__ . '/game_actions_helper.php';
+
+function get_game_state_data($pdo, $sessionId, $playerId = null, $clientVersion = null) {
+    $sessionId = (int)$sessionId;
+
     // 1. Fetch Game Session
     $stmt = $pdo->prepare("SELECT gs.*, q.title as quiz_title FROM game_sessions gs JOIN quizzes q ON gs.quiz_id = q.id WHERE gs.id = ?");
     $stmt->execute([$sessionId]);
@@ -11,7 +15,18 @@ function get_game_state_data($pdo, $sessionId, $playerId = null) {
     if (!$session) {
         return ['status' => 'error', 'message' => 'Game session not found'];
     }
-    
+
+    $currentVersion = crc32($session['status'] . '_' . ($session['current_question_id'] ?? 0) . '_' . ($session['current_question_ended_at'] ?? 0));
+
+    // Fast return if client already has this version
+    if ($playerId && $clientVersion !== null && (int)$clientVersion === (int)$currentVersion) {
+        return [
+            'status' => 'unchanged',
+            'version' => $currentVersion,
+            'server_time' => round(microtime(true) * 1000)
+        ];
+    }
+
     $status = $session['status'];
     $quizId = $session['quiz_id'];
     $currentQuestionId = $session['current_question_id'];
@@ -39,13 +54,14 @@ function get_game_state_data($pdo, $sessionId, $playerId = null) {
         $stmt->execute([$sessionId]);
         $totalPlayers = (int)$stmt->fetchColumn();
         
-        // Host only needs the lobby name list if game is in waiting phase
+        // Host lobby name list: capped at latest 50 to prevent DOM/network overload with 1000 players
         if ($status === 'waiting') {
-            $stmt = $pdo->prepare("SELECT id, nickname FROM players WHERE session_id = ? ORDER BY id DESC");
+            $stmt = $pdo->prepare("SELECT id, nickname FROM players WHERE session_id = ? ORDER BY id DESC LIMIT 50");
             $stmt->execute([$sessionId]);
             $playersList = $stmt->fetchAll();
         }
     }
+
 
     // Question-specific details
     if ($currentQuestionId) {
@@ -148,8 +164,46 @@ function get_game_state_data($pdo, $sessionId, $playerId = null) {
         
         $timeRemainingMs = $limitMs - $elapsedMs;
         $timeRemaining = ceil($timeRemainingMs / 1000);
-        if ($timeRemaining < 0) {
+        if ($timeRemaining <= 0) {
             $timeRemaining = 0;
+            // Server-side auto-resolution: time has elapsed, advance session to 'answers'
+            if ($status === 'question') {
+                end_question_and_show_results($pdo, $sessionId);
+                $status = 'answers';
+                $session['status'] = 'answers';
+
+                // Populate answer reveal details for host
+                if ($isHost && $currentQuestionId) {
+                    $stmt = $pdo->prepare("SELECT id, answer_text, is_correct FROM answers WHERE question_id = ?");
+                    $stmt->execute([$currentQuestionId]);
+                    $rawAnswers = $stmt->fetchAll();
+                    $answers = [];
+                    foreach ($rawAnswers as $ans) {
+                        $answers[] = [
+                            'id' => (int)$ans['id'],
+                            'answer_text' => $ans['answer_text'],
+                            'is_correct' => (int)$ans['is_correct']
+                        ];
+                    }
+                    $stmt = $pdo->prepare("
+                        SELECT pa.answer_id, COUNT(*) as count 
+                        FROM player_answers pa
+                        JOIN players p ON pa.player_id = p.id
+                        WHERE pa.question_id = ? AND p.session_id = ?
+                        GROUP BY pa.answer_id
+                    ");
+                    $stmt->execute([$currentQuestionId, $sessionId]);
+                    $breakdown = $stmt->fetchAll();
+                    foreach ($answers as $ans) {
+                        $answersCount[$ans['id']] = 0;
+                    }
+                    $answersCount['timeout'] = 0;
+                    foreach ($breakdown as $row) {
+                        $key = $row['answer_id'] ?? 'timeout';
+                        $answersCount[$key] = (int)$row['count'];
+                    }
+                }
+            }
         }
     }
     
@@ -200,6 +254,7 @@ function get_game_state_data($pdo, $sessionId, $playerId = null) {
     
     return [
         'status' => 'success',
+        'version' => $currentVersion,
         'session' => [
             'id' => (int)$session['id'],
             'quiz_id' => (int)$session['quiz_id'],
@@ -214,6 +269,7 @@ function get_game_state_data($pdo, $sessionId, $playerId = null) {
             'question_text' => $question ? $question['question_text'] : null,
             'time_limit' => $question ? (int)$question['time_limit'] : null,
             'time_remaining' => (int)$timeRemaining,
+            'server_time' => round(microtime(true) * 1000),
             'answers' => $answers,
             'total_players' => $totalPlayers,
             'total_submitted' => $totalSubmitted,

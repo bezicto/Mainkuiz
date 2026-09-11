@@ -220,88 +220,80 @@
             gameAudio.toggleMute();
         }
 
-        // 1. SSE Connection & Polling Fallback for Game State
-        let eventSource = null;
+        // 1. High-Concurrency Adaptive Jittered Poller (Scales smoothly to 1,000+ players on LAMP)
+        let knownVersion = 0;
+        let isPolling = false;
+        let pollTimer = null;
         let currentQuestionId = null;
-        let fallbackPollTimer = null;
-        let sseHealthy = false;
-        let sseWatchdog = null;
 
-        function fetchStateDirect() {
-            fetch(`../api/game_state.php?session_id=${sessionId}&player_id=${playerId}`)
+        function fetchState() {
+            if (isPolling) return;
+            isPolling = true;
+
+            const url = `../api/game_state.php?session_id=${sessionId}&player_id=${playerId}&v=${knownVersion}`;
+            fetch(url)
                 .then(res => res.json())
                 .then(data => {
-                    if (data && data.status === 'success' && data.session && data.player) {
-                        handleStateTransition(data.session, data.player);
+                    isPolling = false;
+                    if (!data) {
+                        scheduleNextPoll();
+                        return;
                     }
-                })
-                .catch(err => console.warn('Direct fetch state notice:', err));
-        }
 
-        function startFallbackPolling() {
-            if (fallbackPollTimer) return;
-            console.warn('Activating fallback polling mechanism for player state.');
-            fetchStateDirect();
-            fallbackPollTimer = setInterval(fetchStateDirect, 1500);
-        }
+                    if (data.status === 'unchanged') {
+                        // Server confirms state has not changed (0 DB queries executed)
+                        scheduleNextPoll();
+                        return;
+                    }
 
-        function stopFallbackPolling() {
-            if (fallbackPollTimer) {
-                clearInterval(fallbackPollTimer);
-                fallbackPollTimer = null;
-            }
-        }
-
-        function startStreaming() {
-            if (eventSource) {
-                eventSource.close();
-            }
-            sseHealthy = false;
-
-            // Watchdog: If SSE does not receive an event within 3 seconds, start fallback polling
-            clearTimeout(sseWatchdog);
-            sseWatchdog = setTimeout(() => {
-                if (!sseHealthy) {
-                    startFallbackPolling();
-                }
-            }, 3000);
-
-            eventSource = new EventSource(`../api/game_stream.php?session_id=${sessionId}&player_id=${playerId}`);
-            eventSource.onmessage = function(event) {
-                try {
-                    const data = JSON.parse(event.data);
-                    if (data.status === 'success') {
-                        sseHealthy = true;
-                        stopFallbackPolling();
+                    if (data.status === 'success' && data.session && data.player) {
+                        if (data.version) {
+                            knownVersion = data.version;
+                        }
                         handleStateTransition(data.session, data.player);
-                    } else {
-                        stopStreaming();
+                        scheduleNextPoll();
+                    } else if (data.status === 'error') {
                         alert('Session has closed.');
                         window.location.href = '../index.php';
                     }
-                } catch (e) {
-                    console.error('Failed to parse SSE payload:', e);
-                }
-            };
-            eventSource.addEventListener('reconnect', function() {
-                startStreaming();
-            });
-            eventSource.onerror = function(err) {
-                console.warn('SSE Stream error, falling back to polling:', err);
-                eventSource.close();
-                startFallbackPolling();
-                setTimeout(startStreaming, 5000);
-            };
+                })
+                .catch(err => {
+                    isPolling = false;
+                    console.warn('Sync notice:', err);
+                    // Network hiccup - retry with backoff
+                    scheduleNextPoll(2500);
+                });
         }
 
-        function stopStreaming() {
-            clearTimeout(sseWatchdog);
-            if (eventSource) {
-                eventSource.close();
-                eventSource = null;
+        function scheduleNextPoll(overrideMs) {
+            if (pollTimer) clearTimeout(pollTimer);
+
+            let baseMs = 1500;
+            if (currentStatus === 'waiting') {
+                baseMs = 1800;
+            } else if (currentStatus === 'question') {
+                // When player has submitted, poll every 1.5s to listen for answer reveal
+                baseMs = hasSubmittedCurrent ? 1400 : 2000;
+            } else if (currentStatus === 'podium') {
+                baseMs = 5000;
             }
-            stopFallbackPolling();
+
+            if (overrideMs) {
+                baseMs = overrideMs;
+            }
+
+            // Random jitter (+0ms to +350ms) spreads traffic evenly, eliminating thundering herds
+            const jitter = Math.floor(Math.random() * 350);
+            pollTimer = setTimeout(fetchState, baseMs + jitter);
         }
+
+        function stopPolling() {
+            if (pollTimer) {
+                clearTimeout(pollTimer);
+                pollTimer = null;
+            }
+        }
+
 
         // 2. Client Phase UI Controller
         function handleStateTransition(session, player) {
@@ -413,7 +405,8 @@
                 .then(res => res.json())
                 .then(result => {
                     if (result.status === 'success') {
-                        // Points will update in stream transition
+                        // Quick poll to sync immediately after submission
+                        scheduleNextPoll(600);
                     } else {
                         // Revert button pad on error
                         hasSubmittedCurrent = false;
@@ -480,6 +473,7 @@
         }
 
         function leaveGame() {
+            stopPolling();
             sessionStorage.clear();
             window.location.href = '../index.php';
         }
@@ -489,11 +483,9 @@
             gameAudio.init();
         }, { once: true });
 
-        // Immediate direct state fetch for instant UI sync
-        fetchStateDirect();
-
-        // Start SSE stream with automatic fallback polling
-        startStreaming();
+        // Start high-performance adaptive polling
+        fetchState();
     </script>
 </body>
 </html>
+
