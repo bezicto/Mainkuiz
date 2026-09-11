@@ -144,7 +144,7 @@ try {
     $pdo->commit();
     echo "\nSuccess! Database has been populated with mock quiz questions.\n";
     echo "You can now login to http://localhost/admin/ with:\n";
-    echo "Username: admin\nPassword: admin123\n";
+    echo "Username: admin\nPassword: " . ($admin_pass ?? 'abc123') . "\n";
 
 } catch (Exception $e) {
     $pdo->rollBack();
